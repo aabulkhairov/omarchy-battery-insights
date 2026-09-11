@@ -1,0 +1,191 @@
+#!/bin/bash
+
+# Battery Insights data helper. The shell plugin runs it once a minute; it can
+# also be run by hand to inspect what gets logged.
+#
+#   battery-insights sample [--backfill]   append one reading (and a daily health row)
+#   battery-insights info                  print battery facts as key=value
+#
+# Readings come from UPower, so any laptop battery works the same way.
+# Logs live in ${XDG_STATE_HOME:-~/.local/state}/battery-insights/:
+#   samples.csv  t,percent,energy_wh,full_wh,rate_w,state   (last 31 days)
+#   health.csv   date,full_wh,design_wh,cycles              (kept forever)
+# state is one letter: C charging, D discharging, F full, P plugged in but
+# holding (charge limit), U unknown.
+
+set -o pipefail
+
+# Decimal points, not the locale's commas, in everything printf/sort/join touch.
+export LC_ALL=C
+
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/battery-insights
+SAMPLES=$STATE_DIR/samples.csv
+HEALTH=$STATE_DIR/health.csv
+KEEP_DAYS=31
+
+# The system battery, not a mouse or headset: UPower lists those too, and
+# only a laptop battery is flagged as a power supply.
+battery_device() {
+  local device
+  for device in $(upower -e 2>/dev/null | grep '/battery_'); do
+    if upower -i "$device" 2>/dev/null | grep -Eq '^\s*power supply:\s*yes'; then
+      echo "$device"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Flatten `upower -i` into key=value lines with units stripped.
+read_device() {
+  upower -i "$1" | awk '
+    /^ *(native-path|model|vendor|state|energy|energy-full|energy-full-design|energy-rate|percentage|charge-cycles|technology):/ {
+      key = $1; sub(":$", "", key)
+      value = $2
+      sub("%$", "", value)
+      print key "=" value
+    }'
+}
+
+state_letter() {
+  case "$1" in
+    charging) echo C ;;
+    discharging | pending-discharge | empty) echo D ;;
+    fully-charged) echo F ;;
+    pending-charge) echo P ;;
+    *) echo U ;;
+  esac
+}
+
+prune_samples() {
+  local now=$1 first
+  first=$(head -n1 "$SAMPLES" 2>/dev/null | cut -d, -f1)
+  [[ $first =~ ^[0-9]+$ ]] || return 0
+  # Only rewrite once the oldest row is a day past the window, so this runs
+  # about once a day rather than every minute.
+  ((first < now - (KEEP_DAYS + 1) * 86400)) || return 0
+  awk -F, -v cutoff=$((now - KEEP_DAYS * 86400)) '$1 >= cutoff' "$SAMPLES" >"$SAMPLES.tmp" && mv "$SAMPLES.tmp" "$SAMPLES"
+}
+
+record_health() {
+  local today=$1 full=$2 design=$3 cycles=$4 last
+  [[ -n $full && -n $design ]] || return 0
+  last=$(tail -n1 "$HEALTH" 2>/dev/null | cut -d, -f1)
+  [[ $last == "$today" ]] && return 0
+  echo "$today,$full,$design,${cycles:-}" >>"$HEALTH"
+}
+
+# UPower keeps about a week of readings in memory. Pull in whatever falls
+# before the first logged sample or after the last one, so a fresh install
+# has charts right away and a shell restart leaves no hole.
+backfill() {
+  local device=$1 full=$2 first=0 last=0
+  [[ -s $SAMPLES ]] && first=$(head -n1 "$SAMPLES" | cut -d, -f1) && last=$(tail -n1 "$SAMPLES" | cut -d, -f1)
+
+  local history
+  history=$(
+    join -t, \
+      <(upower_history "$device" charge | sort -t, -k1,1) \
+      <(upower_history "$device" rate | cut -d, -f1,2 | sort -t, -k1,1)
+  ) || return 0
+  [[ -n $history ]] || return 0
+
+  # history rows: t,percent,state,rate -> sample rows, at most one a minute.
+  # UPower's numeric states map onto the same letters as state_letter.
+  local rows
+  rows=$(
+    sort -n <<<"$history" | awk -F, -v full="$full" '
+      BEGIN { split("C D D F P D", letter, " ") }
+      !($3 in letter) { next }
+      $1 - kept < 55 { next }
+      {
+        kept = $1
+        printf "%d,%.2f,%.3f,%.3f,%.2f,%s\n", $1, $2, $2 / 100 * full, full, $4, letter[$3]
+      }'
+  )
+  [[ -n $rows ]] || return 0
+
+  {
+    if ((first > 0)); then
+      awk -F, -v first="$first" '$1 < first - 30' <<<"$rows"
+      cat "$SAMPLES"
+      awk -F, -v last="$last" '$1 > last + 30' <<<"$rows"
+    else
+      echo "$rows"
+    fi
+  } >"$SAMPLES.tmp" && mv "$SAMPLES.tmp" "$SAMPLES"
+}
+
+# One "t,value,state" row per UPower history point. State 0 rows are UPower's
+# placeholders (value 0) and would pair up with real rows in the join.
+upower_history() {
+  gdbus call --system --dest org.freedesktop.UPower --object-path "$1" \
+    --method org.freedesktop.UPower.Device.GetHistory "$2" 0 100000 2>/dev/null |
+    grep -oE '\((uint32 )?[0-9]+, [0-9.e+-]+, (uint32 )?[0-9]+\)' |
+    sed -E 's/uint32 //g; s/[() ]//g' |
+    awk -F, '$3 != 0'
+}
+
+cmd_sample() {
+  local device
+  device=$(battery_device) || { echo "battery-insights: no system battery found" >&2; exit 2; }
+
+  mkdir -p "$STATE_DIR"
+  exec 9>"$STATE_DIR/.lock"
+  flock -w 10 9 || exit 1
+
+  local -A v
+  local key value
+  while IFS='=' read -r key value; do v[$key]=$value; done < <(read_device "$device")
+
+  local now
+  printf -v now '%(%s)T' -1
+
+  [[ ${1:-} == --backfill ]] && backfill "$device" "${v[energy-full]}"
+
+  printf '%d,%.2f,%.3f,%.3f,%.2f,%s\n' "$now" "${v[percentage]:-0}" "${v[energy]:-0}" \
+    "${v[energy-full]:-0}" "${v[energy-rate]:-0}" "$(state_letter "${v[state]}")" >>"$SAMPLES"
+
+  local today
+  printf -v today '%(%F)T' -1
+  record_health "$today" "${v[energy-full]}" "${v[energy-full-design]}" "${v[charge-cycles]}"
+  prune_samples "$now"
+}
+
+cmd_info() {
+  local device
+  device=$(battery_device) || { echo "battery-insights: no system battery found" >&2; exit 2; }
+
+  local -A v
+  local key value
+  while IFS='=' read -r key value; do v[$key]=$value; done < <(read_device "$device")
+
+  echo "model=${v[model]}"
+  echo "vendor=${v[vendor]}"
+  echo "technology=${v[technology]}"
+  echo "full_wh=${v[energy-full]}"
+  echo "design_wh=${v[energy-full-design]}"
+  echo "cycles=${v[charge-cycles]}"
+
+  # Not every battery reports when it was made; UPower does not pass it on,
+  # so read it straight from the kernel.
+  local sys=/sys/class/power_supply/${v[native-path]}
+  if [[ -n ${v[native-path]} && -r $sys/manufacture_year ]]; then
+    local year month day
+    year=$(<"$sys/manufacture_year")
+    month=$(cat "$sys/manufacture_month" 2>/dev/null || echo 1)
+    day=$(cat "$sys/manufacture_day" 2>/dev/null || echo 1)
+    # 10# so a zero-padded "08" is not read as octal.
+    [[ $year =~ ^[0-9]+$ && $month =~ ^[0-9]+$ && $day =~ ^[0-9]+$ ]] &&
+      printf 'manufactured=%04d-%02d-%02d\n' $((10#$year)) $((10#$month)) $((10#$day))
+  fi
+}
+
+case "${1:-}" in
+  sample) shift; cmd_sample "$@" ;;
+  info) cmd_info ;;
+  *)
+    echo "Usage: battery-insights sample [--backfill] | info" >&2
+    exit 1
+    ;;
+esac
