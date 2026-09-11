@@ -69,7 +69,7 @@ To open it from a keybinding, call its IPC target, for example in
 `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + CTRL + B", "Battery insights", "omarchy-shell aabulkhairov.battery-insights toggle")
+o.bind("SUPER + CTRL + SHIFT + B", "Battery insights", "omarchy-shell shell toggle aabulkhairov.battery-insights")
 ```
 
 ## How it works
