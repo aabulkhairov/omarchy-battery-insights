@@ -40,7 +40,31 @@ Panel {
   readonly property bool onBattery: batteryPresent && UPower.onBattery
   readonly property bool charging: batteryPresent && device.state === UPowerDeviceState.Charging
   readonly property real rateW: batteryPresent ? Math.abs(Number(device.changeRate) || 0) : 0
-  readonly property bool showRateNow: showRate && onBattery && rateW > 0 && !vertical
+  readonly property bool chargeThresholdActive: {
+    if (!(batteryPresent && !onBattery)) return false
+    var fraction = percent / 100
+    if (device.state === UPowerDeviceState.Discharging) return false
+    if (device.state === UPowerDeviceState.PendingCharge) return true
+    if (device.state === UPowerDeviceState.FullyCharged && fraction < 0.99) return true
+    if (device.state !== UPowerDeviceState.Charging || fraction >= 0.99) return false
+    return rateW <= 0.2 || Number(device.timeToFull || 0) >= 8 * 60 * 60
+  }
+  readonly property string batteryIcon: {
+    if (!batteryPresent) return ""
+    var chargingIcons = ["󰢜", "󰂆", "󰂇", "󰂈", "󰢝", "󰂉", "󰢞", "󰂊", "󰂋", "󰂅"]
+    var defaultIcons = ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"]
+    var index = Math.max(0, Math.min(9, Math.floor((percent / 100) * 10)))
+    if (chargeThresholdActive) return defaultIcons[index]
+    if (device.state === UPowerDeviceState.FullyCharged) return "󰂅"
+    if (!onBattery) return chargingIcons[index]
+    return defaultIcons[index]
+  }
+  readonly property bool showRateNow: showRate && (onBattery || charging) && !chargeThresholdActive && rateW > 0 && !vertical
+  readonly property string barLabelText: {
+    if (!showRate || vertical || !batteryPresent) return ""
+    var pct = Math.round(percent) + "%"
+    return showRateNow ? rateW.toFixed(1) + "W " + pct : pct
+  }
   readonly property bool vertical: bar ? bar.vertical : false
 
   readonly property string statusText: {
@@ -177,16 +201,16 @@ Panel {
     id: barLabelMetrics
     font.family: root.bar ? root.bar.fontFamily : Style.font.family
     font.pixelSize: Style.bar.iconFont
-    text: root.showRateNow ? root.rateW.toFixed(1) + "W" : ""
+    text: root.barLabelText
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰄪"
-    labelText: root.showRateNow ? root.rateW.toFixed(1) + "W" : ""
-    slotSize: root.showRateNow ? Math.ceil(barLabelMetrics.advanceWidth) + Style.bar.iconSlot + Style.space(8) : Style.bar.iconSlot
+    text: root.showRate ? root.batteryIcon : "󰄪"
+    labelText: root.barLabelText
+    slotSize: root.barLabelText !== "" ? Math.ceil(barLabelMetrics.advanceWidth) + Style.bar.iconSlot + Style.space(8) : Style.bar.iconSlot
     tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.toggleRate()

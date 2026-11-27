@@ -23,8 +23,8 @@
       {
         "key": "showRate",
         "type": "boolean",
-        "label": "Show power draw",
-        "description": "Show the current discharge rate in watts next to the icon while on battery.",
+        "label": "Show battery percentage & power draw",
+        "description": "Show charge percentage and live watts next to the battery icon (also toggled by right-click).",
         "defaultValue": false
       }
     ]
