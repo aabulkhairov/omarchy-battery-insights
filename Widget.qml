@@ -37,12 +37,37 @@ Panel {
   readonly property var device: UPower.displayDevice
   readonly property bool batteryPresent: !!(device && device.isPresent)
   readonly property real percent: batteryPresent ? Math.max(0, Math.min(1, device.percentage)) * 100 : 0
-  readonly property bool onBattery: batteryPresent && (
-    UPower.onBattery
-    || device.state === UPowerDeviceState.Discharging
-    || (UPowerDeviceState.PendingDischarge !== undefined && device.state === UPowerDeviceState.PendingDischarge)
-  )
-  readonly property bool charging: batteryPresent && device.state === UPowerDeviceState.Charging
+  // Some laptop ECs (e.g. ASUS Zephyrus G14 over USB-C PD) report
+  // state=Discharging while UPower.onBattery is false and the battery is
+  // actually charging; conversely, a stuck UCSI line_power device can leave
+  // UPower.onBattery false while truly discharging. Disambiguate using the
+  // direction of device.energy when those two signals disagree.
+  readonly property bool ambiguousAcDischarge: batteryPresent && !UPower.onBattery && device.state === UPowerDeviceState.Discharging
+  property real lastEnergyWh: -1
+  property int energyTrend: 0
+  onAmbiguousAcDischargeChanged: {
+    energyTrend = 0
+    lastEnergyWh = batteryPresent ? (Number(device.energy) || -1) : -1
+  }
+  Component.onCompleted: {
+    if (batteryPresent) lastEnergyWh = Number(device.energy) || -1
+  }
+  Connections {
+    target: root.device
+    ignoreUnknownSignals: true
+    function onEnergyChanged() {
+      var e = Number(root.device ? root.device.energy : 0) || 0
+      if (e <= 0) return
+      if (root.lastEnergyWh <= 0) {
+        root.lastEnergyWh = e
+      } else if (Math.abs(e - root.lastEnergyWh) >= 0.005) {
+        root.energyTrend = e > root.lastEnergyWh ? 1 : -1
+        root.lastEnergyWh = e
+      }
+    }
+  }
+  readonly property bool onBattery: batteryPresent && (UPower.onBattery || (ambiguousAcDischarge && energyTrend < 0))
+  readonly property bool charging: batteryPresent && (device.state === UPowerDeviceState.Charging || (ambiguousAcDischarge && energyTrend >= 0 && rateW > 0.2))
   readonly property real rateW: batteryPresent ? Math.abs(Number(device.changeRate) || 0) : 0
   readonly property bool chargeThresholdActive: {
     if (!(batteryPresent && !onBattery)) return false
@@ -63,7 +88,7 @@ Panel {
     if (!onBattery) return chargingIcons[index]
     return defaultIcons[index]
   }
-  readonly property bool showRateNow: showRate && (onBattery || charging) && !chargeThresholdActive && rateW > 0 && !vertical
+  readonly property bool showRateNow: showRate && !chargeThresholdActive && rateW > 0 && !vertical
   readonly property string barLabelText: {
     if (!showRate || vertical || !batteryPresent) return ""
     var pct = Math.round(percent) + "%"
