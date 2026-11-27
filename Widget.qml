@@ -173,12 +173,20 @@ Panel {
     onTriggered: root.rebuild()
   }
 
+  TextMetrics {
+    id: barLabelMetrics
+    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+    font.pixelSize: Style.bar.iconFont
+    text: root.showRateNow ? root.rateW.toFixed(1) + "W" : ""
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.showRateNow ? root.rateW.toFixed(1) + "W 󰄪" : "󰄪"
-    slotSize: Style.bar.iconSlot * (root.showRateNow ? 2.6 : 1)
+    text: "󰄪"
+    labelText: root.showRateNow ? root.rateW.toFixed(1) + "W" : ""
+    slotSize: root.showRateNow ? Math.ceil(barLabelMetrics.advanceWidth) + Style.bar.iconSlot + Style.space(8) : Style.bar.iconSlot
     tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.toggleRate()
