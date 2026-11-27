@@ -37,7 +37,11 @@ Panel {
   readonly property var device: UPower.displayDevice
   readonly property bool batteryPresent: !!(device && device.isPresent)
   readonly property real percent: batteryPresent ? Math.max(0, Math.min(1, device.percentage)) * 100 : 0
-  readonly property bool onBattery: batteryPresent && UPower.onBattery
+  readonly property bool onBattery: batteryPresent && (
+    UPower.onBattery
+    || device.state === UPowerDeviceState.Discharging
+    || (UPowerDeviceState.PendingDischarge !== undefined && device.state === UPowerDeviceState.PendingDischarge)
+  )
   readonly property bool charging: batteryPresent && device.state === UPowerDeviceState.Charging
   readonly property real rateW: batteryPresent ? Math.abs(Number(device.changeRate) || 0) : 0
   readonly property bool chargeThresholdActive: {
